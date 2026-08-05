@@ -1,121 +1,56 @@
-# Member Role Report — Day 9: Multi Agent A2A
+# Báo cáo cá nhân — Day 09 Multi-Agent A2A
 
-> Mỗi thành viên trong nhóm tự hoàn thành mẫu này để báo cáo đúng vai trò, phần việc và mức hiểu của mình. Không sao chép nguyên báo cáo chung hoặc báo cáo của thành viên khác. Thay nội dung trong dấu `[ ]` và xóa các dòng hướng dẫn không cần thiết trước khi nộp.
+| Thông tin | Nội dung |
+| --- | --- |
+| Họ và tên | Nguyễn Quang Sơn |
+| MSSV | 2A202601956 |
+| Vai trò | Multi-Agent Pipeline & Policy Engineer |
 
-## 1. Thông tin cá nhân
+## Phần việc sở hữu
 
-| Thông tin       | Nội dung     |
-| --------------- | ------------ |
-| Họ và tên       | [Họ và tên]  |
-| MSSV            | [MSSV]       |
-| Khóa/Lớp        | [K4]         |
-| Vai trò chính   | [Vai trò]    |
-| Ngày hoàn thành | [YYYY-MM-DD] |
+| Module | Bàn giao | Cách xác minh |
+| --- | --- | --- |
+| Data/Domain agents | `main.py`: Customer, Order/Product, Payment, Delivery | Unit test fixture và output batch |
+| Policy/Verifier | `main.py`: PolicyAgent, VerifierAgent | Kiểm tra policy priority, evidence ID, array limits |
+| Coordinator online | `main.py`: `OnlineCoordinatorReviewer` | Trace ghi model Nemotron Nano 9B và review theo case |
+| Tài liệu vận hành | `architecture.md`, `metadata.json`, `trace.jsonl` | Đọc runbook, chạy batch 50 case |
 
-## 2. Vai trò và phạm vi công việc
+## Cách triển khai
 
-### Phần việc sở hữu
+Pipeline đọc toàn bộ CSV và tạo index theo order/customer để các agent dùng chung dữ
+liệu nguồn. Customer Agent tách `customer_unique_id` khỏi `customer_id`; Order/Product
+Agent không đưa order lịch sử vào affected entities; Payment và Delivery Agent tính
+toán từ số/timestamp CSV. Policy Agent áp dụng `EC_POLICY_V2` theo thứ tự ưu tiên.
+Verifier kiểm các evidence ID được dựng từ CSV, giới hạn array, confidence và null
+handling trước khi output được ghi.
 
-| Module/deliverable | File/hàm phụ trách | Input nhận vào | Output bàn giao   | Trạng thái                            |
-| ------------------ | ------------------ | -------------- | ----------------- | ------------------------------------- |
-| [Phần việc]        | [File/hàm]         | [Input]        | [Output/artifact] | [Hoàn thành/Một phần/Chưa hoàn thành] |
-| [Phần việc]        | [File/hàm]         | [Input]        | [Output/artifact] | [Hoàn thành/Một phần/Chưa hoàn thành] |
+Coordinator gọi `nvidia/nemotron-nano-9b-v2:free` trên OpenRouter. Model được dùng để
+review handoff và ghi trace, không có quyền ghi đè kết quả xác định của policy engine.
+Điều này vừa có multi-agent/LLM trace vừa tránh dữ kiện hoặc số tiền bịa đặt.
 
-Chỉ nhận ownership cho phần bạn trực tiếp thực hiện. Liên hệ rõ phần việc của bạn với đầu vào, đầu ra và các thành viên phụ thuộc vào phần đó.
+## Input/output contract
 
-### Việc hỗ trợ ngoài phạm vi chính
+- Input: `input/EC_001.json` … `input/EC_050.json`, đúng schema README.
+- Output: JSON cùng tên trong `output/`, đúng schema EC_POLICY_V2.
+- Runtime config: `.env` chứa duy nhất secret `OPENROUTER_API_KEY`; model ID và 7B
+  parameter count 9B nằm trong source/`metadata.json` để chấm.
+- Lỗi chặn: thiếu case, order ID không tồn tại, thiếu key, model không còn miễn phí,
+  hoặc output không đủ 50 file.
 
-| Hoạt động                 | Thành viên/module được hỗ trợ | Kết quả                 |
-| ------------------------- | ----------------------------- | ----------------------- |
-| [Debug/tích hợp/tài liệu] | [Tên hoặc module]             | [Kết quả và bằng chứng] |
+## Quyết định kỹ thuật
 
-## 3. Kết quả theo vai trò
+Chọn NVIDIA Nemotron Nano 9B qua OpenRouter thay vì tải Ollama local. Lý do: giới hạn model được
+khai báo rõ dưới 10B, không mất thời gian tải model, còn số liệu nghiệp vụ vẫn được
+quyết định bằng code tái lập được. Model free thay đổi theo provider nên runner xác
+minh đúng model trước batch và không tự fallback sang model lớn hơn.
 
-| Nhiệm vụ đã thực hiện | File/hàm/artifact liên quan | Kết quả bàn giao          | Cách xác minh   |
-| --------------------- | --------------------------- | ------------------------- | --------------- |
-| [Mô tả cụ thể]        | [Đường dẫn file]            | [Artifact/metrics/report] | [Lệnh/artifact] |
-| [Mô tả cụ thể]        | [Đường dẫn file]            | [Artifact/metrics/report] | [Lệnh/artifact] |
-
-Nêu một output cụ thể mà phần việc của bạn tạo ra hoặc giúp xác minh:
-
-[Mô tả artifact, metric, report hoặc kết quả tích hợp.]
-
-## 4. Giải thích phần kỹ thuật đã thực hiện
-
-### Vấn đề cần giải quyết
-
-[Phần của bạn giải quyết vấn đề gì trong pipeline?]
-
-### Cách triển khai
-
-[Mô tả thuật toán, quy tắc dữ liệu, orchestration hoặc quyết định chính. Không chỉ chép lại tên hàm.]
-
-### Input, output và contract
-
-| Thành phần              | Mô tả                                  |
-| ----------------------- | -------------------------------------- |
-| Input                   | [Schema, artifact hoặc tham số]        |
-| Output                  | [Schema, artifact hoặc giá trị trả về] |
-| Module phụ thuộc        | [Module/file liên quan]                |
-| Module sử dụng output   | [Module/file liên quan]                |
-| Điều kiện lỗi cần xử lý | [Trường hợp thực tế]                   |
-
-### Cách xác minh
+## Xác minh khi có input
 
 ```bash
-[Ghi lệnh thực tế đã chạy]
+python3 main.py run
+python3 main.py package
 ```
 
-- **Kết quả mong đợi:** [Mô tả.]
-- **Kết quả thực tế:** [Mô tả.]
-- **Artifact/log:** [Đường dẫn; không chứa secret.]
-
-## 5. Một quyết định kỹ thuật quan trọng
-
-- **Bối cảnh:** [Vấn đề hoặc lựa chọn cần quyết định.]
-- **Các phương án đã cân nhắc:** [Ít nhất hai phương án.]
-- **Phương án đã chọn:** [Lựa chọn.]
-- **Lý do:** [Trade-off về correctness, data quality, reproducibility, cost hoặc độ phức tạp.]
-- **Bằng chứng quyết định phù hợp:** [Metric, artifact hoặc kết quả thử nghiệm.]
-
-## 6. Một lỗi hoặc blocker đã xử lý
-
-- **Triệu chứng/lỗi nguyên văn:** [Che toàn bộ secret trước khi ghi.]
-- **Lệnh hoặc bước tái hiện:** [Lệnh/bước.]
-- **Nguyên nhân gốc:** [Root cause, không chỉ mô tả triệu chứng.]
-- **Cách xử lý:** [Thay đổi cụ thể.]
-- **Cách xác minh sau khi sửa:** [Lệnh và kết quả.]
-- **Điều học được:** [Bài học kỹ thuật.]
-
-Nếu chưa xử lý xong:
-
-- **Phạm vi bị ảnh hưởng:** [Module/artifact.]
-- **Những gì đã loại trừ:** [Các giả thuyết đã kiểm tra.]
-- **Bước tiếp theo:** [Hành động có thể kiểm chứng.]
-
-## 7. Hiểu biết về luồng end-to-end
-
-Giải thích ngắn gọn bằng lời của bạn:
-
-1. Dữ liệu đi từ Crossref đến vector index như thế nào?
-2. Evaluation set và ground-truth document IDs dùng để đo retrieval/answer quality ra sao?
-3. Quality checks khác freshness monitoring ở điểm nào trong bài lab?
-4. Vì sao phải dùng cùng test set cho baseline, corrupted và repaired?
-5. Repair được xem là thành công dựa trên artifact và metric nào?
-
-**Câu trả lời:**
-
-[Viết câu trả lời tại đây.]
-
-## 8. Cam kết của thành viên
-
-Đánh dấu sau khi tự kiểm tra:
-
-- [ ] Nội dung báo cáo phản ánh đúng phần việc và mức hiểu của tôi.
-- [ ] Tôi có thể giải thích luồng end-to-end, không chỉ module mình phụ trách.
-- [ ] Tôi không ghi “đã chạy thành công” cho phần chưa được kiểm chứng.
-- [ ] Báo cáo không chứa `.env`, API key, token hoặc secret.
-- [ ] Báo cáo này không phải bản sao nguyên văn của báo cáo nhóm hoặc báo cáo thành viên khác.
-
-**Họ và tên:** [Họ và tên]
-**Ngày xác nhận:** [YYYY-MM-DD]
+Kết quả hợp lệ: 50 output JSON, 50 dòng `trace.jsonl`, `metadata.json` ghi model 9B,
+và `output.zip` chỉ chứa 50 JSON. Chưa ghi nhận “đã chạy thành công” vì input thật
+chưa được cung cấp.

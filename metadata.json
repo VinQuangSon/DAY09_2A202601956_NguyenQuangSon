@@ -1,0 +1,8 @@
+{
+  "model": "nvidia/nemotron-nano-9b-v2:free",
+  "parameter_count_b": 9,
+  "provider": "OpenRouter",
+  "framework": "Python stdlib multi-agent pipeline",
+  "runtime": "OpenRouter API",
+  "policy_version": "EC_POLICY_V2"
+}
