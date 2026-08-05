@@ -9,7 +9,10 @@ Coordinator Agent
    ├─ task → Payment Agent ──────── reconciliation ───────────── handoff ─┤
    ├─ task → Delivery Agent ─────── variances/late sellers ───── handoff ─┤
    │                                                                    │
-   ├─ task → Policy Agent ←──────── verified domain handoffs ────────────┘
+   ├─ task → Fact Verification Agent ← order/item/payment joins ─────────┘
+   │              └─ hard gate: reject mismatched or ungrounded facts
+   │
+   ├─ task → Policy Agent ←──────── verified fact attestation only
    │              └─ taxonomy + responsibility + refund + actions
    │
    ├─ assemble candidate output
@@ -28,11 +31,24 @@ Coordinator Agent
 | Order/Product | orders, items, products | entities, products, categories | CSV facts only |
 | Payment | items, payments | reconciliation totals | CSV arithmetic only |
 | Delivery | orders, items | timestamp variance, late seller IDs | CSV timestamps only |
-| Policy | all previous handoffs | issue, cause, parties, refund, actions | `EC_POLICY_V2` only |
+| Fact Verification | orders, customers, items, payments plus domain handoffs | cross-source attestation | May stop the case; cannot decide policy |
+| Policy | verified handoffs + attestation | issue, cause, parties, refund, actions | `EC_POLICY_V2` only; refuses unverified input |
 | Coordinator | input plus all returned handoffs | assignments, assembled candidate, one NIM review | Orchestration and assembly; no CSV arithmetic |
 | Verifier | assembled output | accept/reject | schema, evidence IDs, limits, null rules |
 
-Each case records 12 structured messages: six Coordinator assignments and six
+The customer complaint is treated as untrusted input. Its `claimed_order_id` is
+only a lookup key. Before Policy runs, Fact Verification independently joins the
+order to its customer, every item row and every payment row, then recomputes the
+payment and item/freight totals. A failed check raises an error before any refund
+or resolution action can be produced.
+
+Missing data is not converted into a negative fact. In particular, when
+`order_delivered_carrier_date` is absent, Delivery returns empty seller-handoff
+arrays instead of inventing an on-time handoff. Itemless orders use `0.0` for
+the observable item/freight sums and `null` for expected total, difference and
+reconciliation status. Money uses decimal `ROUND_HALF_UP` semantics.
+
+Each case records 14 structured messages: seven Coordinator assignments and seven
 agent returns. The trace therefore proves which agent performed each task and
 what payload was handed back; the implementation does not place the whole case
 into one monolithic prompt. The deterministic domain agents remain authoritative
@@ -42,6 +58,8 @@ overwriting it.
 The coordinator uses `nvidia/nvidia-nemotron-nano-9b-v2` through NVIDIA's hosted
 NIM API. It is declared as 9B parameters in source and metadata. The runner rejects
 any configured model size at or above 10B and never routes to a larger fallback.
+Each trace record also stores NIM latency and the provider-reported prompt,
+completion and total token counts, so performance claims can be reproduced.
 
 ## Runbook
 

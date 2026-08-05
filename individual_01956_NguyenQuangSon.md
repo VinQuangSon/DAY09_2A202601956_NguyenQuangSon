@@ -11,8 +11,8 @@
 | Module | Bàn giao | Cách xác minh |
 | --- | --- | --- |
 | Data/Domain agents | `main.py`: Customer, Order/Product, Payment, Delivery | Unit test fixture và output batch |
-| Policy/Verifier | `main.py`: PolicyAgent, VerifierAgent | Kiểm tra policy priority, evidence ID, array limits |
-| Coordinator online | `main.py`: `CoordinatorAgent`, `NvidiaNimCoordinatorReviewer` | Trace ghi 12 handoff và review Nemotron Nano 9B theo case |
+| Policy/Verifier | `main.py`: FactVerificationAgent, PolicyAgent, VerifierAgent | Join chéo nguồn, policy priority, evidence ID, array limits |
+| Coordinator online | `main.py`: `CoordinatorAgent`, `NvidiaNimCoordinatorReviewer` | Trace ghi 14 handoff và review Nemotron Nano 9B theo case |
 | Tài liệu vận hành | `architecture.md`, `metadata.json`, `trace.jsonl` | Đọc runbook, chạy batch 50 case |
 
 ## Cách triển khai
@@ -20,13 +20,15 @@
 Pipeline đọc toàn bộ CSV và tạo index theo order/customer để các agent dùng chung dữ
 liệu nguồn. Customer Agent tách `customer_unique_id` khỏi `customer_id`; Order/Product
 Agent không đưa order lịch sử vào affected entities; Payment và Delivery Agent tính
-toán từ số/timestamp CSV. Policy Agent áp dụng `EC_POLICY_V2` theo thứ tự ưu tiên.
+toán từ số/timestamp CSV. Fact Verification Agent coi complaint là input không
+đáng tin, join lại order/customer/item/payment và tính lại các tổng tiền trước khi
+cho phép Policy Agent áp dụng `EC_POLICY_V2` theo thứ tự ưu tiên.
 Verifier kiểm các evidence ID được dựng từ CSV, giới hạn array, confidence và null
 handling trước khi output được ghi.
 
-`CoordinatorAgent` giao sáu nhiệm vụ độc lập và nhận sáu structured handoff từ
-Customer, Order/Product, Payment, Delivery, Policy và Verifier. Mỗi case lưu đủ
-12 message giao/nhận trong một record của `trace.jsonl`, nên có thể kiểm chứng
+`CoordinatorAgent` giao bảy nhiệm vụ và nhận bảy structured handoff từ Customer,
+Order/Product, Payment, Delivery, Fact Verification, Policy và Verifier. Mỗi case lưu đủ
+14 message giao/nhận trong một record của `trace.jsonl`, nên có thể kiểm chứng
 agent nào thực hiện domain nào và payload nào được bàn giao. Verifier chạy sau
 khi Coordinator lắp ráp candidate output và chặn sai schema, evidence ID, tiền,
 null handling hoặc array limit trước khi ghi file.
@@ -59,4 +61,4 @@ python3 main.py package
 ```
 
 Kết quả hợp lệ: 50 output JSON, 50 dòng `trace.jsonl`, `metadata.json` ghi model 9B,
-và `output.zip` chỉ chứa 50 JSON.
+trace có latency/token usage thật cho từng case, và `output.zip` chỉ chứa 50 JSON.

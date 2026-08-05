@@ -20,6 +20,7 @@ import zipfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,10 @@ def parse_dt(value: str | None) -> datetime | None:
 
 
 def round2(value: float | None) -> float | None:
-    return round(value, 2) if value is not None else None
+    return (
+        float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        if value is not None else None
+    )
 
 
 def ordered_unique(values: list[str], limit: int) -> list[str]:
@@ -185,23 +189,33 @@ class OrderProductAgent:
 
 class PaymentAgent:
     def run(self, order_id: str, items: list[dict[str, str]], payments: list[dict[str, str]]) -> dict[str, Any]:
-        payment_total = round2(sum(float(row["payment_value"]) for row in payments))
+        payment_total_decimal = sum(
+            (Decimal(row["payment_value"]) for row in payments), Decimal(0)
+        )
+        payment_total = round2(float(payment_total_decimal))
         if not items:
             return {
-                "currency": "BRL", "item_total_brl": None, "freight_total_brl": None,
+                "currency": "BRL", "item_total_brl": 0.0, "freight_total_brl": 0.0,
                 "expected_total_brl": None, "payment_total_brl": payment_total,
                 "difference_brl": None, "reconciled": None,
                 "payment_types": ordered_unique([row["payment_type"] for row in payments], 5),
                 "payment_ids": [f"{order_id}:{row['payment_sequential']}" for row in payments[:5]],
             }
-        item_total = round2(sum(float(row["price"]) for row in items))
-        freight_total = round2(sum(float(row["freight_value"]) for row in items))
-        expected_total = round2((item_total or 0) + (freight_total or 0))
-        difference = round2(payment_total - expected_total)
+        item_total_decimal = sum((Decimal(row["price"]) for row in items), Decimal(0))
+        freight_total_decimal = sum(
+            (Decimal(row["freight_value"]) for row in items), Decimal(0)
+        )
+        expected_total_decimal = item_total_decimal + freight_total_decimal
+        difference_decimal = payment_total_decimal - expected_total_decimal
+        item_total = round2(float(item_total_decimal))
+        freight_total = round2(float(freight_total_decimal))
+        expected_total = round2(float(expected_total_decimal))
+        difference = round2(float(difference_decimal))
         return {
             "currency": "BRL", "item_total_brl": item_total, "freight_total_brl": freight_total,
             "expected_total_brl": expected_total, "payment_total_brl": payment_total,
-            "difference_brl": difference, "reconciled": abs(difference or 0) <= 0.10,
+            "difference_brl": difference,
+            "reconciled": abs(difference_decimal) <= Decimal("0.10"),
             "payment_types": ordered_unique([row["payment_type"] for row in payments], 5),
             "payment_ids": [f"{order_id}:{row['payment_sequential']}" for row in payments[:5]],
         }
@@ -220,7 +234,10 @@ class DeliveryAgent:
             if limit:
                 seller_limits[item["seller_id"]].append(limit)
         analysis: list[dict[str, Any]] = []
-        for seller_id in ordered_unique([item["seller_id"] for item in items], 3):
+        # Without a carrier handoff timestamp there is no evidence from which
+        # to label a seller as on-time or late. Do not synthesize false rows.
+        seller_ids = ordered_unique([item["seller_id"] for item in items], 3) if carrier_dt else []
+        for seller_id in seller_ids:
             earliest = min(seller_limits[seller_id]) if seller_limits.get(seller_id) else None
             variance = round2((carrier_dt - earliest).total_seconds() / 3600) if carrier_dt and earliest else None
             analysis.append({
@@ -237,8 +254,90 @@ class DeliveryAgent:
         }
 
 
+class FactVerificationAgent:
+    """Hard-gate policy decisions on independently cross-checked CSV facts.
+
+    The customer message is an untrusted claim.  Only the claimed order ID is
+    used as a lookup key; status, ownership, items, payments and money totals
+    must all be reconstructed from the source tables before PolicyAgent runs.
+    """
+
+    def run(
+        self,
+        data: OlistData,
+        order_id: str,
+        order: dict[str, str],
+        order_info: dict[str, Any],
+        payment: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_items = data.items_by_order.get(order_id, [])
+        source_payments = data.payments_by_order.get(order_id, [])
+        customer = data.customers.get(order.get("customer_id", ""))
+        checks = {
+            "order_join": data.orders.get(order_id) is order and order.get("order_id") == order_id,
+            "customer_join": customer is not None,
+            "item_join": (
+                order_info["items"] == source_items
+                and all(row.get("order_id") == order_id for row in source_items)
+            ),
+            "payment_join": all(row.get("order_id") == order_id for row in source_payments),
+            "entity_join": order_info["affected_entities"]["order_ids"] == [order_id],
+        }
+
+        source_payment_decimal = sum(
+            (Decimal(row["payment_value"]) for row in source_payments), Decimal(0)
+        )
+        source_payment_total = round2(float(source_payment_decimal))
+        checks["payment_total"] = payment["payment_total_brl"] == source_payment_total
+        checks["payment_ids"] = payment["payment_ids"] == [
+            f"{order_id}:{row['payment_sequential']}" for row in source_payments[:5]
+        ]
+        if source_items:
+            source_item_decimal = sum(
+                (Decimal(row["price"]) for row in source_items), Decimal(0)
+            )
+            source_freight_decimal = sum(
+                (Decimal(row["freight_value"]) for row in source_items), Decimal(0)
+            )
+            source_expected_decimal = source_item_decimal + source_freight_decimal
+            source_item_total = round2(float(source_item_decimal))
+            source_freight_total = round2(float(source_freight_decimal))
+            source_expected_total = round2(float(source_expected_decimal))
+            checks["item_freight_totals"] = (
+                payment["item_total_brl"] == source_item_total
+                and payment["freight_total_brl"] == source_freight_total
+                and payment["expected_total_brl"] == source_expected_total
+                and payment["difference_brl"] == round2(
+                    float(source_payment_decimal - source_expected_decimal)
+                )
+            )
+        else:
+            checks["item_freight_totals"] = (
+                payment["item_total_brl"] == 0.0
+                and payment["freight_total_brl"] == 0.0
+                and all(
+                    payment[name] is None
+                    for name in ("expected_total_brl", "difference_brl")
+                )
+            )
+
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            raise ValueError(f"Cross-source verification failed for {order_id}: {failed}")
+        return {
+            "facts_verified": True,
+            "claim_treated_as_untrusted": True,
+            "verified_order_id": order_id,
+            "item_row_count": len(source_items),
+            "payment_row_count": len(source_payments),
+            "checks": list(checks),
+        }
+
+
 class PolicyAgent:
-    def run(self, order: dict[str, str], order_info: dict[str, Any], payment: dict[str, Any], delivery: dict[str, Any]) -> dict[str, Any]:
+    def run(self, order: dict[str, str], order_info: dict[str, Any], payment: dict[str, Any], delivery: dict[str, Any], verification: dict[str, Any]) -> dict[str, Any]:
+        if verification.get("facts_verified") is not True:
+            raise ValueError("PolicyAgent requires verified cross-source facts")
         status = order["order_status"]
         paid = (payment["payment_total_brl"] or 0) > 0
         late_delivery = bool(delivery["delivery_variance_hours"] is not None and delivery["delivery_variance_hours"] > 0)
@@ -346,7 +445,9 @@ class VerifierAgent:
 
         if not entities["item_ids"]:
             payment = output["payment_reconciliation"]
-            if any(payment[name] is not None for name in ("item_total_brl", "freight_total_brl", "expected_total_brl", "difference_brl", "reconciled")):
+            if payment["item_total_brl"] != 0.0 or payment["freight_total_brl"] != 0.0:
+                raise ValueError("itemless order must use zero item/freight sums")
+            if any(payment[name] is not None for name in ("expected_total_brl", "difference_brl", "reconciled")):
                 raise ValueError("itemless order must use null reconciliation fields")
             if any((entities["seller_ids"], output["product_context"]["product_ids"],
                     output["product_context"]["category_names"],
@@ -364,12 +465,13 @@ class NvidiaNimCoordinatorReviewer:
         if MODEL_PARAMETER_COUNT_B >= 10:
             raise RuntimeError(f"Configured model must be under 10B, got {MODEL_PARAMETER_COUNT_B}B.")
 
-    def review(self, case_id: str, handoffs: list[dict[str, Any]]) -> str:
+    def review(self, case_id: str, handoffs: list[dict[str, Any]]) -> tuple[str, dict[str, int], float]:
         workflow = {"case_id": case_id, "agent_handoffs": handoffs}
         body = {"model": MODEL_ID, "temperature": 0, "max_tokens": 120,
                 "messages": [{"role": "system", "content": "You are the Coordinator verifier. Review the structured handoffs from specialized e-commerce agents. Do not invent facts or alter EC_POLICY_V2. Return one concise Vietnamese sentence."},
                              {"role": "user", "content": json.dumps(workflow, ensure_ascii=False)}]}
         request = urllib.request.Request(f"{MODEL_BASE_URL}/chat/completions", data=json.dumps(body).encode(), method="POST", headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
+        started = time.perf_counter()
         try:
             with urllib.request.urlopen(request, timeout=60, context=self.ssl_context) as response:
                 payload = json.load(response)
@@ -381,16 +483,23 @@ class NvidiaNimCoordinatorReviewer:
                     "trace were left untouched; retry after the provider quota resets."
                 ) from error
             raise
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        raw_usage = payload.get("usage") or {}
+        usage = {
+            "prompt_tokens": int(raw_usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(raw_usage.get("completion_tokens") or 0),
+            "total_tokens": int(raw_usage.get("total_tokens") or 0),
+        }
         message = payload["choices"][0]["message"]
         content = message.get("content")
         if isinstance(content, str) and content.strip():
-            return content.strip()
+            return content.strip(), usage, latency_ms
         # Some reasoning models return only a reasoning field or no text. This
         # affects trace readability only; deterministic agents own final output.
         reasoning = message.get("reasoning_content") or message.get("reasoning")
         if isinstance(reasoning, str) and reasoning.strip():
-            return reasoning.strip()[:1000]
-        return "Coordinator returned no textual review."
+            return reasoning.strip()[:1000], usage, latency_ms
+        return "Coordinator returned no textual review.", usage, latency_ms
 
 
 class CoordinatorAgent:
@@ -401,6 +510,7 @@ class CoordinatorAgent:
         self.order_product_agent = OrderProductAgent()
         self.payment_agent = PaymentAgent()
         self.delivery_agent = DeliveryAgent()
+        self.fact_verification_agent = FactVerificationAgent()
         self.policy_agent = PolicyAgent()
         self.verifier_agent = VerifierAgent()
 
@@ -449,10 +559,16 @@ class CoordinatorAgent:
         messages.append(self._handoff(8, "DeliveryAgent", "CoordinatorAgent",
                                       "Delivery analysis handoff.", delivery))
 
-        messages.append(self._handoff(9, "CoordinatorAgent", "PolicyAgent",
-                                      "Apply EC_POLICY_V2 to verified domain handoffs.", {"policy_version": POLICY_VERSION}))
-        policy = self.policy_agent.run(order, order_info, payment, delivery)
-        messages.append(self._handoff(10, "PolicyAgent", "CoordinatorAgent",
+        messages.append(self._handoff(9, "CoordinatorAgent", "FactVerificationAgent",
+                                      "Cross-check order, customer, item, payment, and money joins before policy.", {"order_id": order_id}))
+        verification = self.fact_verification_agent.run(data, order_id, order, order_info, payment)
+        messages.append(self._handoff(10, "FactVerificationAgent", "CoordinatorAgent",
+                                      "Verified source-fact attestation handoff.", verification))
+
+        messages.append(self._handoff(11, "CoordinatorAgent", "PolicyAgent",
+                                      "Apply EC_POLICY_V2 only to verified source facts.", {"policy_version": POLICY_VERSION, "facts_verified": verification["facts_verified"]}))
+        policy = self.policy_agent.run(order, order_info, payment, delivery, verification)
+        messages.append(self._handoff(12, "PolicyAgent", "CoordinatorAgent",
                                       "Policy decision handoff.", policy))
 
         evidence = [f"order:{order_id}"]
@@ -462,7 +578,7 @@ class CoordinatorAgent:
         evidence.append(f"policy:{policy['cause']}")
         output = {
             "case_id": case["case_id"],
-            "case_assessment": {"primary_issue": policy["primary"], "secondary_issues": policy["secondary"], "case_status": "action_required" if policy["refund"] > 0 else "no_action", "confidence": 1.0},
+            "case_assessment": {"primary_issue": policy["primary"], "secondary_issues": policy["secondary"], "case_status": "action_required" if policy["refund"] > 0 else "no_action", "confidence": 0.92},
             "affected_entities": {**order_info["affected_entities"], "payment_ids": payment["payment_ids"]},
             "customer_context": customer, "product_context": order_info["product_context"],
             "delivery_analysis": delivery,
@@ -473,10 +589,10 @@ class CoordinatorAgent:
             "resolution_actions": policy["actions"],
         }
 
-        messages.append(self._handoff(11, "CoordinatorAgent", "VerifierAgent",
+        messages.append(self._handoff(13, "CoordinatorAgent", "VerifierAgent",
                                       "Validate schema, IDs, money, nulls, limits, and internal consistency.", {"case_id": case["case_id"]}))
         self.verifier_agent.validate(output)
-        messages.append(self._handoff(12, "VerifierAgent", "CoordinatorAgent",
+        messages.append(self._handoff(14, "VerifierAgent", "CoordinatorAgent",
                                       "Validation handoff.", {"valid": True, "case_id": case["case_id"]}))
         return output, [message.as_dict() for message in messages]
 
@@ -507,9 +623,14 @@ def run_batch(allow_any_count: bool = False, skip_model: bool = False) -> None:
         started = time.perf_counter()
         case = json.loads(path.read_text(encoding="utf-8"))
         output, handoffs = build_output(case, data)
-        review = reviewer.review(case["case_id"], handoffs) if reviewer and not skip_model else "Model review skipped for local test."
+        if reviewer and not skip_model:
+            review, model_usage, model_latency_ms = reviewer.review(case["case_id"], handoffs)
+        else:
+            review = "Model review skipped for local test."
+            model_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            model_latency_ms = 0.0
         generated_outputs.append((path.name, output))
-        traces.append(json.dumps({"case_id": case["case_id"], "model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "agents": ["CoordinatorAgent", "CustomerAgent", "OrderProductAgent", "PaymentAgent", "DeliveryAgent", "PolicyAgent", "VerifierAgent"], "handoffs": handoffs, "coordinator_review": review, "duration_ms": round((time.perf_counter() - started) * 1000, 2)}, ensure_ascii=False))
+        traces.append(json.dumps({"case_id": case["case_id"], "model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "agents": ["CoordinatorAgent", "CustomerAgent", "OrderProductAgent", "PaymentAgent", "DeliveryAgent", "FactVerificationAgent", "PolicyAgent", "VerifierAgent"], "handoffs": handoffs, "coordinator_review": review, "model_usage": model_usage, "model_latency_ms": model_latency_ms, "duration_ms": round((time.perf_counter() - started) * 1000, 2)}, ensure_ascii=False))
     # Commit generated artifacts only after all model calls succeed. A quota or
     # network failure must not destroy the last complete submission.
     for path in OUTPUT_DIR.glob("EC_*.json"):

@@ -6,7 +6,7 @@
       "repeat_customer"
     ],
     "case_status": "action_required",
-    "confidence": 1.0
+    "confidence": 0.92
   },
   "affected_entities": {
     "order_ids": [
@@ -38,8 +38,8 @@
   },
   "payment_reconciliation": {
     "currency": "BRL",
-    "item_total_brl": null,
-    "freight_total_brl": null,
+    "item_total_brl": 0.0,
+    "freight_total_brl": 0.0,
     "expected_total_brl": null,
     "payment_total_brl": 18.37,
     "difference_brl": null,

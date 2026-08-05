@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<analysis>
+  <thinking><![CDATA[
+Phương pháp kiểm toán (không phải suy luận nội bộ): đọc đúng 50 input, 50 output
+và 50 record trace của lượt NVIDIA NIM mới nhất. Mỗi tỷ lệ bên dưới ghi rõ tử số
+và mẫu số. Latency lấy từ time.perf_counter; token lấy trực tiếp từ trường usage
+của NVIDIA NIM. Không trộn số liệu Discord/VLearn vào Day09.
+
+Input Day09 chỉ có một template intent “điều tra khiếu nại” và 50 order ID duy
+nhất, nên không tồn tại ground truth cho bốn intent Greeting/Academic FAQ/
+Logistics/Out-of-Scope. Tương tự, không có SQLite, TA queue, deadline học tập,
+cache hoặc nhãn tool-call expected/actual. Các metric đó phải là N/A, không được
+ước lượng.
+
+Trade-off kiến trúc: complaint là dữ liệu không tin cậy; chỉ dùng claimed_order_id
+làm lookup key. FactVerificationAgent độc lập join order-customer-item-payment,
+tính lại tổng tiền và tạo attestation. PolicyAgent là hard gate: thiếu attestation
+thì dừng trước mọi refund/action. NIM 9B chỉ review trace và không được ghi đè kết
+quả deterministic. Điều này ưu tiên độ đúng và khả năng audit; chi phí là thêm hai
+handoff nội bộ nhưng không thêm model call.
+  ]]></thinking>
+
+  <metrics_dashboard><![CDATA[
+| Metric | Kết quả | Công thức / bằng chứng |
+|---|---:|---|
+| Query-to-Intent Accuracy | N/A | Không có nhãn intent và input chỉ có 1 template điều tra |
+| Tool Call F1 | N/A | Không có expected/actual tool-call labels trong trace |
+| Deadline Hallucination Rate | N/A | Day09 không có deadline học tập |
+| Cross-source fact verification | 100% | 50 fact_verified / 50 case |
+| Final verifier pass rate | 100% | 50 valid / 50 case |
+| Mean end-to-end latency | 2.653 s/case | mean(duration_ms)=2653.13 ms trên 50 case |
+| Median / p95 / max latency | 2.670 / 3.008 / 3.456 s | nearest-rank p95 trên 50 trace |
+| Mean NIM latency | 2.650 s/case | mean(model_latency_ms)=2649.94 ms |
+| NIM share of latency | 99.88% | 2649.94 / 2653.13 |
+| Input tokens | 83,188 total; 1,663.76/case | sum(prompt_tokens) / 50 |
+| Output tokens | 6,000 total; 120/case | sum(completion_tokens) / 50 |
+| Total tokens | 89,188; 1,783.76/case | input + output |
+| Cache hit rate | N/A | Pipeline chưa có cache và trace không có cache_hit |
+| Ticket creation / TA resolution | N/A | Không có TA queue hoặc timestamps trong schema Day09 |
+| Duplicate order rate | 0% | 0 duplicate claimed_order_id / 50 case |
+| Repeated request-template rate | 98% | 49 lượt sau trùng template đầu / 50; không đồng nghĩa duplicate order |
+| Handoff completeness | 100% | 700/700 expected handoffs: 14 x 50 |
+
+Primary-issue distribution: unsupported_late_claim=8, late_delivery_seller=10,
+late_delivery_logistics=10, canceled_order_paid=8, valid_split_payment=8,
+unavailable_order_paid=6.
+  ]]></metrics_dashboard>
+
+  <bottleneck_analysis><![CDATA[
+- NIM review là bottleneck số 1: chiếm 99.88% end-to-end latency dù không có
+  quyền thay đổi output. Có thể batch hoặc chạy review ngoài critical path sau
+  khi deterministic verifier đã chấp nhận output.
+- Trust boundary trước đây chưa phải hard gate: tên task nói “verified” nhưng
+  Policy nhận thẳng handoff. Đã sửa bằng FactVerificationAgent, 8 phép kiểm join/
+  totals và Policy từ chối facts_verified != true.
+- Observability còn thiếu cho các metric Discord được yêu cầu: không có intent
+  ground truth, tool labels, cache events, TA lifecycle hay SQLite/JSON error
+  events. Không thể tính Accuracy/F1/MTTR hợp lệ từ trace Day09 hiện tại.
+  ]]></bottleneck_analysis>
+
+  <redesigned_pipeline><![CDATA[
+START
+  -> InputContractGuard (schema, policy_version; complaint is untrusted)
+  -> [CustomerAgent || OrderProductAgent]
+  -> [PaymentAgent || DeliveryAgent]       # parallel after item join
+  -> FactVerificationAgent
+       | failed -> ErrorRecord -> END      # no refund/action/output
+       | passed
+       v
+     PolicyAgent (EC_POLICY_V2 only)
+       -> Coordinator assembles candidate
+       -> VerifierAgent
+            | failed -> ErrorRecord -> END
+            | passed -> write output
+                         -> NIM review/telemetry (non-authoritative)
+                         -> END
+
+LangGraph-compatible State and deterministic router blueprint:
+
+from typing import Any, Literal, TypedDict
+
+class DisputeState(TypedDict, total=False):
+    case: dict[str, Any]
+    order_id: str
+    customer: dict[str, Any]
+    order_info: dict[str, Any]
+    payment: dict[str, Any]
+    delivery: dict[str, Any]
+    verification: dict[str, Any]
+    policy: dict[str, Any]
+    output: dict[str, Any]
+    error: dict[str, str]
+    retry_count: int
+
+def should_continue(state: DisputeState) -> Literal[
+    "fact_verify", "policy", "output_verify", "self_correct", "end"
+]:
+    if state.get("error"):
+        # Deterministic ceiling: one repair only; never loop indefinitely.
+        return "self_correct" if state.get("retry_count", 0) < 1 else "end"
+    if "verification" not in state:
+        return "fact_verify"
+    if state["verification"].get("facts_verified") is not True:
+        return "end"
+    if "policy" not in state:
+        return "policy"
+    if "output" not in state:
+        return "output_verify"
+    return "end"
+
+def self_correct(state: DisputeState) -> DisputeState:
+    # Never send secrets, customer message, or an unrestricted stack trace to LLM.
+    error = state.get("error", {})
+    allowed = {k: str(error.get(k, ""))[:300] for k in ("type", "stage", "message")}
+    return {**state, "error": allowed, "retry_count": state.get("retry_count", 0) + 1}
+
+# Tool contracts stay within 5 active parameters:
+# verify_facts(data, order_id, order_info, payment) -> attestation
+# apply_policy(order, order_info, payment, delivery, attestation) -> decision
+
+Privacy rule: raw customer_request.message is never trusted as evidence and is
+not sent to the model. Only allowlisted IDs and minimized structured handoffs are
+logged. Secrets remain in .env and never enter trace/output.
+  ]]></redesigned_pipeline>
+</analysis>
