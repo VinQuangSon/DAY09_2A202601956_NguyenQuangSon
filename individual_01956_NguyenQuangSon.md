@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | Data/Domain agents | `main.py`: Customer, Order/Product, Payment, Delivery | Unit test fixture và output batch |
 | Policy/Verifier | `main.py`: PolicyAgent, VerifierAgent | Kiểm tra policy priority, evidence ID, array limits |
-| Coordinator online | `main.py`: `NvidiaNimCoordinatorReviewer` | Trace ghi model Nemotron Nano 9B và review theo case |
+| Coordinator online | `main.py`: `CoordinatorAgent`, `NvidiaNimCoordinatorReviewer` | Trace ghi 12 handoff và review Nemotron Nano 9B theo case |
 | Tài liệu vận hành | `architecture.md`, `metadata.json`, `trace.jsonl` | Đọc runbook, chạy batch 50 case |
 
 ## Cách triển khai
@@ -23,6 +23,13 @@ Agent không đưa order lịch sử vào affected entities; Payment và Deliver
 toán từ số/timestamp CSV. Policy Agent áp dụng `EC_POLICY_V2` theo thứ tự ưu tiên.
 Verifier kiểm các evidence ID được dựng từ CSV, giới hạn array, confidence và null
 handling trước khi output được ghi.
+
+`CoordinatorAgent` giao sáu nhiệm vụ độc lập và nhận sáu structured handoff từ
+Customer, Order/Product, Payment, Delivery, Policy và Verifier. Mỗi case lưu đủ
+12 message giao/nhận trong một record của `trace.jsonl`, nên có thể kiểm chứng
+agent nào thực hiện domain nào và payload nào được bàn giao. Verifier chạy sau
+khi Coordinator lắp ráp candidate output và chặn sai schema, evidence ID, tiền,
+null handling hoặc array limit trước khi ghi file.
 
 Coordinator gọi `nvidia/nvidia-nemotron-nano-9b-v2` trên NVIDIA NIM. Model được dùng để
 review handoff và ghi trace, không có quyền ghi đè kết quả xác định của policy engine.

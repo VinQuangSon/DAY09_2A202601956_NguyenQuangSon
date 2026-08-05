@@ -2,7 +2,7 @@
   "model": "nvidia/nvidia-nemotron-nano-9b-v2",
   "parameter_count_b": 9,
   "provider": "NVIDIA NIM",
-  "framework": "Python stdlib multi-agent pipeline",
+  "framework": "Python stdlib orchestrated multi-agent handoff pipeline",
   "runtime": "NVIDIA hosted NIM API",
   "policy_version": "EC_POLICY_V2"
 }

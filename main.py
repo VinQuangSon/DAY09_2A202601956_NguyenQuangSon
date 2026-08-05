@@ -130,6 +130,26 @@ class OlistData:
         )
 
 
+@dataclass(frozen=True)
+class AgentHandoff:
+    """Auditable message exchanged between two specialized agents."""
+
+    step: int
+    sender: str
+    recipient: str
+    task: str
+    payload: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "sender": self.sender,
+            "recipient": self.recipient,
+            "task": self.task,
+            "payload": self.payload,
+        }
+
+
 class CustomerAgent:
     def run(self, data: OlistData, order: dict[str, str]) -> dict[str, Any]:
         customer = data.customers[order["customer_id"]]
@@ -266,7 +286,16 @@ class PolicyAgent:
 
 class VerifierAgent:
     def validate(self, output: dict[str, Any]) -> None:
-        assert 0 <= output["case_assessment"]["confidence"] <= 1
+        required = {
+            "case_id", "case_assessment", "affected_entities", "customer_context",
+            "product_context", "delivery_analysis", "payment_reconciliation",
+            "root_cause_analysis", "evidence_ids", "financial_resolution",
+            "resolution_actions",
+        }
+        if set(output) != required:
+            raise ValueError(f"Output schema mismatch: {sorted(set(output) ^ required)}")
+        if not 0 <= output["case_assessment"]["confidence"] <= 1:
+            raise ValueError("confidence must be in [0, 1]")
         limits = {"order_ids": 5, "item_ids": 5, "seller_ids": 3, "payment_ids": 5,
                   "related_order_ids": 5, "product_ids": 5, "category_names": 5,
                   "ranked_causes": 3, "responsible_parties": 3, "evidence_ids": 20,
@@ -275,9 +304,55 @@ class VerifierAgent:
                   **output["root_cause_analysis"], "evidence_ids": output["evidence_ids"],
                   "resolution_actions": output["resolution_actions"]}
         for name, maximum in limits.items():
-            assert len(groups[name]) <= maximum, f"{name} exceeds {maximum}"
+            if len(groups[name]) > maximum:
+                raise ValueError(f"{name} exceeds {maximum}")
+
+        refund = output["financial_resolution"]["recommended_refund_brl"]
+        expected_status = "action_required" if refund > 0 else "no_action"
+        if output["case_assessment"]["case_status"] != expected_status:
+            raise ValueError("case_status does not agree with refund")
+        if output["financial_resolution"]["currency"] != "BRL" or output["payment_reconciliation"]["currency"] != "BRL":
+            raise ValueError("currency must be BRL")
+
+        for timestamp in ("delivered_at", "estimated_delivery_at", "carrier_handoff_at"):
+            value = output["delivery_analysis"][timestamp]
+            if value is not None:
+                parse_dt(value)
+        money_fields = [refund] + [
+            output["payment_reconciliation"][name] for name in (
+                "item_total_brl", "freight_total_brl", "expected_total_brl",
+                "payment_total_brl", "difference_brl",
+            )
+        ]
+        if any(value is not None and round2(value) != value for value in money_fields):
+            raise ValueError("money fields must be rounded to two decimals")
+
+        entities = output["affected_entities"]
+        causes = output["root_cause_analysis"]["ranked_causes"]
+        parties = output["root_cause_analysis"]["responsible_parties"]
+        expected_evidence = [f"order:{value}" for value in entities["order_ids"]]
+        expected_evidence += [f"item:{value}" for value in entities["item_ids"]]
+        expected_evidence += [f"payment:{value}" for value in entities["payment_ids"]]
+        expected_evidence += [
+            f"seller:{party['party_id']}" for party in parties
+            if party["party_type"] == "seller"
+        ]
+        expected_evidence += [f"policy:{cause['cause_code']}" for cause in causes]
+        if output["evidence_ids"] != expected_evidence[:20]:
+            raise ValueError("evidence IDs do not match assembled source entities")
         for evidence in output["evidence_ids"]:
-            assert evidence.startswith(("order:", "item:", "payment:", "seller:", "policy:")), evidence
+            if not evidence.startswith(("order:", "item:", "payment:", "seller:", "policy:")):
+                raise ValueError(f"invalid evidence ID: {evidence}")
+
+        if not entities["item_ids"]:
+            payment = output["payment_reconciliation"]
+            if any(payment[name] is not None for name in ("item_total_brl", "freight_total_brl", "expected_total_brl", "difference_brl", "reconciled")):
+                raise ValueError("itemless order must use null reconciliation fields")
+            if any((entities["seller_ids"], output["product_context"]["product_ids"],
+                    output["product_context"]["category_names"],
+                    output["delivery_analysis"]["seller_handoff_analysis"],
+                    output["delivery_analysis"]["late_handoff_seller_ids"])):
+                raise ValueError("itemless order must have empty item-derived arrays")
 
 
 class NvidiaNimCoordinatorReviewer:
@@ -289,11 +364,11 @@ class NvidiaNimCoordinatorReviewer:
         if MODEL_PARAMETER_COUNT_B >= 10:
             raise RuntimeError(f"Configured model must be under 10B, got {MODEL_PARAMETER_COUNT_B}B.")
 
-    def review(self, case_id: str, policy: dict[str, Any], payment: dict[str, Any], delivery: dict[str, Any]) -> str:
-        handoff = {"case_id": case_id, "policy": policy, "payment": payment, "delivery": delivery}
+    def review(self, case_id: str, handoffs: list[dict[str, Any]]) -> str:
+        workflow = {"case_id": case_id, "agent_handoffs": handoffs}
         body = {"model": MODEL_ID, "temperature": 0, "max_tokens": 120,
-                "messages": [{"role": "system", "content": "Review this deterministic e-commerce dispute handoff. Do not invent facts. Return one concise Vietnamese sentence."},
-                             {"role": "user", "content": json.dumps(handoff, ensure_ascii=False)}]}
+                "messages": [{"role": "system", "content": "You are the Coordinator verifier. Review the structured handoffs from specialized e-commerce agents. Do not invent facts or alter EC_POLICY_V2. Return one concise Vietnamese sentence."},
+                             {"role": "user", "content": json.dumps(workflow, ensure_ascii=False)}]}
         request = urllib.request.Request(f"{MODEL_BASE_URL}/chat/completions", data=json.dumps(body).encode(), method="POST", headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=60, context=self.ssl_context) as response:
@@ -318,40 +393,100 @@ class NvidiaNimCoordinatorReviewer:
         return "Coordinator returned no textual review."
 
 
-def build_output(case: dict[str, Any], data: OlistData) -> tuple[dict[str, Any], dict[str, Any]]:
-    order_id = case["customer_request"]["claimed_order_id"]
-    if order_id not in data.orders: raise ValueError(f"claimed_order_id not found: {order_id}")
-    order = data.orders[order_id]
-    customer = CustomerAgent().run(data, order)
-    order_info = OrderProductAgent().run(data, order_id)
-    order_info["has_repeat_customer"] = bool(customer["related_order_ids"])
-    payments = data.payments_by_order.get(order_id, [])
-    payment = PaymentAgent().run(order_id, order_info["items"], payments)
-    delivery = DeliveryAgent().run(order, order_info["items"])
-    policy = PolicyAgent().run(order, order_info, payment, delivery)
-    evidence = [f"order:{order_id}"]
-    evidence += [f"item:{item_id}" for item_id in order_info["affected_entities"]["item_ids"]]
-    evidence += [f"payment:{payment_id}" for payment_id in payment["payment_ids"]]
-    evidence += [f"seller:{party['party_id']}" for party in policy["parties"] if party["party_type"] == "seller"]
-    evidence.append(f"policy:{policy['cause']}")
-    output = {
-        "case_id": case["case_id"],
-        "case_assessment": {"primary_issue": policy["primary"], "secondary_issues": policy["secondary"], "case_status": "action_required" if policy["refund"] > 0 else "no_action", "confidence": 0.99},
-        "affected_entities": {**order_info["affected_entities"], "payment_ids": payment["payment_ids"]},
-        "customer_context": customer, "product_context": order_info["product_context"],
-        "delivery_analysis": delivery,
-        "payment_reconciliation": {key: value for key, value in payment.items() if key != "payment_ids"},
-        "root_cause_analysis": {"ranked_causes": [{"cause_code": policy["cause"], "rank": 1}], "responsible_parties": policy["parties"]},
-        "evidence_ids": evidence[:20],
-        "financial_resolution": {"currency": "BRL", "recommended_refund_brl": policy["refund"]},
-        "resolution_actions": policy["actions"],
-    }
-    VerifierAgent().validate(output)
-    return output, {"policy": policy, "payment": payment, "delivery": delivery}
+class CoordinatorAgent:
+    """Delegates domain work and assembles only validated agent handoffs."""
+
+    def __init__(self) -> None:
+        self.customer_agent = CustomerAgent()
+        self.order_product_agent = OrderProductAgent()
+        self.payment_agent = PaymentAgent()
+        self.delivery_agent = DeliveryAgent()
+        self.policy_agent = PolicyAgent()
+        self.verifier_agent = VerifierAgent()
+
+    @staticmethod
+    def _handoff(step: int, sender: str, recipient: str, task: str,
+                 payload: dict[str, Any]) -> AgentHandoff:
+        return AgentHandoff(step, sender, recipient, task, payload)
+
+    def run(self, case: dict[str, Any], data: OlistData) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if case.get("policy_version") != POLICY_VERSION:
+            raise ValueError(f"Unsupported policy_version: {case.get('policy_version')}")
+        order_id = case["customer_request"]["claimed_order_id"]
+        if order_id not in data.orders:
+            raise ValueError(f"claimed_order_id not found: {order_id}")
+        order = data.orders[order_id]
+        messages: list[AgentHandoff] = []
+
+        messages.append(self._handoff(1, "CoordinatorAgent", "CustomerAgent",
+                                      "Resolve customer identity and related-order history.", {"order_id": order_id}))
+        customer = self.customer_agent.run(data, order)
+        messages.append(self._handoff(2, "CustomerAgent", "CoordinatorAgent",
+                                      "Customer context handoff.", customer))
+
+        messages.append(self._handoff(3, "CoordinatorAgent", "OrderProductAgent",
+                                      "Resolve items, sellers, products, and categories.", {"order_id": order_id}))
+        order_info = self.order_product_agent.run(data, order_id)
+        order_info["has_repeat_customer"] = bool(customer["related_order_ids"])
+        product_handoff = {
+            "item_count": len(order_info["items"]),
+            "affected_entities": order_info["affected_entities"],
+            "product_context": order_info["product_context"],
+        }
+        messages.append(self._handoff(4, "OrderProductAgent", "CoordinatorAgent",
+                                      "Order and product context handoff.", product_handoff))
+
+        messages.append(self._handoff(5, "CoordinatorAgent", "PaymentAgent",
+                                      "Reconcile every payment row against item and freight totals.", {"order_id": order_id}))
+        payments = data.payments_by_order.get(order_id, [])
+        payment = self.payment_agent.run(order_id, order_info["items"], payments)
+        messages.append(self._handoff(6, "PaymentAgent", "CoordinatorAgent",
+                                      "Payment reconciliation handoff.", payment))
+
+        messages.append(self._handoff(7, "CoordinatorAgent", "DeliveryAgent",
+                                      "Calculate delivery and seller-handoff variances.", {"order_id": order_id}))
+        delivery = self.delivery_agent.run(order, order_info["items"])
+        messages.append(self._handoff(8, "DeliveryAgent", "CoordinatorAgent",
+                                      "Delivery analysis handoff.", delivery))
+
+        messages.append(self._handoff(9, "CoordinatorAgent", "PolicyAgent",
+                                      "Apply EC_POLICY_V2 to verified domain handoffs.", {"policy_version": POLICY_VERSION}))
+        policy = self.policy_agent.run(order, order_info, payment, delivery)
+        messages.append(self._handoff(10, "PolicyAgent", "CoordinatorAgent",
+                                      "Policy decision handoff.", policy))
+
+        evidence = [f"order:{order_id}"]
+        evidence += [f"item:{item_id}" for item_id in order_info["affected_entities"]["item_ids"]]
+        evidence += [f"payment:{payment_id}" for payment_id in payment["payment_ids"]]
+        evidence += [f"seller:{party['party_id']}" for party in policy["parties"] if party["party_type"] == "seller"]
+        evidence.append(f"policy:{policy['cause']}")
+        output = {
+            "case_id": case["case_id"],
+            "case_assessment": {"primary_issue": policy["primary"], "secondary_issues": policy["secondary"], "case_status": "action_required" if policy["refund"] > 0 else "no_action", "confidence": 0.99},
+            "affected_entities": {**order_info["affected_entities"], "payment_ids": payment["payment_ids"]},
+            "customer_context": customer, "product_context": order_info["product_context"],
+            "delivery_analysis": delivery,
+            "payment_reconciliation": {key: value for key, value in payment.items() if key != "payment_ids"},
+            "root_cause_analysis": {"ranked_causes": [{"cause_code": policy["cause"], "rank": 1}], "responsible_parties": policy["parties"]},
+            "evidence_ids": evidence[:20],
+            "financial_resolution": {"currency": "BRL", "recommended_refund_brl": policy["refund"]},
+            "resolution_actions": policy["actions"],
+        }
+
+        messages.append(self._handoff(11, "CoordinatorAgent", "VerifierAgent",
+                                      "Validate schema, IDs, money, nulls, limits, and internal consistency.", {"case_id": case["case_id"]}))
+        self.verifier_agent.validate(output)
+        messages.append(self._handoff(12, "VerifierAgent", "CoordinatorAgent",
+                                      "Validation handoff.", {"valid": True, "case_id": case["case_id"]}))
+        return output, [message.as_dict() for message in messages]
+
+
+def build_output(case: dict[str, Any], data: OlistData) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    return CoordinatorAgent().run(case, data)
 
 
 def write_metadata() -> None:
-    METADATA_PATH.write_text(json.dumps({"model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "provider": MODEL_PROVIDER, "framework": "Python stdlib multi-agent pipeline", "runtime": "NVIDIA hosted NIM API", "policy_version": POLICY_VERSION}, ensure_ascii=False, indent=2), encoding="utf-8")
+    METADATA_PATH.write_text(json.dumps({"model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "provider": MODEL_PROVIDER, "framework": "Python stdlib orchestrated multi-agent handoff pipeline", "runtime": "NVIDIA hosted NIM API", "policy_version": POLICY_VERSION}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def run_batch(allow_any_count: bool = False, skip_model: bool = False) -> None:
@@ -371,10 +506,10 @@ def run_batch(allow_any_count: bool = False, skip_model: bool = False) -> None:
     for path in cases:
         started = time.perf_counter()
         case = json.loads(path.read_text(encoding="utf-8"))
-        output, handoff = build_output(case, data)
-        review = reviewer.review(case["case_id"], **handoff) if reviewer and not skip_model else "Model review skipped for local test."
+        output, handoffs = build_output(case, data)
+        review = reviewer.review(case["case_id"], handoffs) if reviewer and not skip_model else "Model review skipped for local test."
         generated_outputs.append((path.name, output))
-        traces.append(json.dumps({"case_id": case["case_id"], "model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "agents": ["Customer", "OrderProduct", "Payment", "Delivery", "Policy", "Verifier", "Coordinator"], "coordinator_review": review, "duration_ms": round((time.perf_counter() - started) * 1000, 2)}, ensure_ascii=False))
+        traces.append(json.dumps({"case_id": case["case_id"], "model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "agents": ["CoordinatorAgent", "CustomerAgent", "OrderProductAgent", "PaymentAgent", "DeliveryAgent", "PolicyAgent", "VerifierAgent"], "handoffs": handoffs, "coordinator_review": review, "duration_ms": round((time.perf_counter() - started) * 1000, 2)}, ensure_ascii=False))
     # Commit generated artifacts only after all model calls succeed. A quota or
     # network failure must not destroy the last complete submission.
     for path in OUTPUT_DIR.glob("EC_*.json"):

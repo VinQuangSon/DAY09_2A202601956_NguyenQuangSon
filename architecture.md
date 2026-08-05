@@ -3,19 +3,21 @@
 ```text
 Input case
    │
-   ├─ Customer Agent ────── customer identity + related orders
-   ├─ Order/Product Agent ─ items + sellers + products + categories
-   ├─ Payment Agent ─────── payment reconciliation
-   ├─ Delivery Agent ────── delivery and seller-handoff variance
+Coordinator Agent
+   ├─ task → Customer Agent ─────── identity + related orders ── handoff ─┐
+   ├─ task → Order/Product Agent ── items/sellers/products ───── handoff ─┤
+   ├─ task → Payment Agent ──────── reconciliation ───────────── handoff ─┤
+   ├─ task → Delivery Agent ─────── variances/late sellers ───── handoff ─┤
+   │                                                                    │
+   ├─ task → Policy Agent ←──────── verified domain handoffs ────────────┘
+   │              └─ taxonomy + responsibility + refund + actions
    │
-   └─ Policy Agent ─────── EC_POLICY_V2 decision
-                               │
-                    Coordinator (NVIDIA NIM Nemotron Nano 9B)
-                    review-only trace; cannot modify result
-                               │
-                    Verifier Agent ─ schema, IDs, limits, nulls
-                               │
-                         output/EC_XXX.json + trace.jsonl
+   ├─ assemble candidate output
+   ├─ task → Verifier Agent ─────── schema/IDs/money/nulls/limits
+   │              └─ valid handoff or reject
+   │
+   └─ NVIDIA NIM Nemotron Nano 9B reviews the full handoff chain
+                   └─ output/EC_XXX.json + one trace.jsonl record
 ```
 
 ## Agent contracts and access
@@ -27,8 +29,15 @@ Input case
 | Payment | items, payments | reconciliation totals | CSV arithmetic only |
 | Delivery | orders, items | timestamp variance, late seller IDs | CSV timestamps only |
 | Policy | all previous handoffs | issue, cause, parties, refund, actions | `EC_POLICY_V2` only |
-| Coordinator | compact handoffs | one Vietnamese review sentence in trace | Review only; no output mutation |
+| Coordinator | input plus all returned handoffs | assignments, assembled candidate, one NIM review | Orchestration and assembly; no CSV arithmetic |
 | Verifier | assembled output | accept/reject | schema, evidence IDs, limits, null rules |
+
+Each case records 12 structured messages: six Coordinator assignments and six
+agent returns. The trace therefore proves which agent performed each task and
+what payload was handed back; the implementation does not place the whole case
+into one monolithic prompt. The deterministic domain agents remain authoritative
+for CSV facts, while NVIDIA NIM reviews the completed handoff chain without
+overwriting it.
 
 The coordinator uses `nvidia/nvidia-nemotron-nano-9b-v2` through NVIDIA's hosted
 NIM API. It is declared as 9B parameters in source and metadata. The runner rejects

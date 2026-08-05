@@ -1,9 +1,27 @@
 import unittest
+import json
 
-from main import OlistData, PaymentAgent, PolicyAgent
+from main import INPUT_DIR, OlistData, PaymentAgent, PolicyAgent, build_output
 
 
 class PolicyPipelineTests(unittest.TestCase):
+    def test_coordinator_records_real_agent_handoffs(self):
+        case = json.loads((INPUT_DIR / "EC_001.json").read_text(encoding="utf-8"))
+        output, handoffs = build_output(case, OlistData.load())
+        self.assertEqual(output["case_id"], "EC_001")
+        self.assertEqual(len(handoffs), 12)
+        self.assertEqual(handoffs[0]["sender"], "CoordinatorAgent")
+        self.assertEqual(handoffs[0]["recipient"], "CustomerAgent")
+        self.assertEqual(handoffs[-1]["sender"], "VerifierAgent")
+        self.assertTrue(handoffs[-1]["payload"]["valid"])
+        returned_agents = {
+            row["sender"] for row in handoffs if row["recipient"] == "CoordinatorAgent"
+        }
+        self.assertEqual(returned_agents, {
+            "CustomerAgent", "OrderProductAgent", "PaymentAgent",
+            "DeliveryAgent", "PolicyAgent", "VerifierAgent",
+        })
+
     def test_payment_rows_preserve_csv_source_order(self):
         data = OlistData.load()
         order_id = "23c312ca9f0242a48a95e5643bee2645"
