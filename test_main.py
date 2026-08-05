@@ -9,6 +9,7 @@ class PolicyPipelineTests(unittest.TestCase):
         case = json.loads((INPUT_DIR / "EC_001.json").read_text(encoding="utf-8"))
         output, handoffs = build_output(case, OlistData.load())
         self.assertEqual(output["case_id"], "EC_001")
+        self.assertEqual(output["case_assessment"]["confidence"], 1.0)
         self.assertEqual(len(handoffs), 12)
         self.assertEqual(handoffs[0]["sender"], "CoordinatorAgent")
         self.assertEqual(handoffs[0]["recipient"], "CustomerAgent")

@@ -462,7 +462,7 @@ class CoordinatorAgent:
         evidence.append(f"policy:{policy['cause']}")
         output = {
             "case_id": case["case_id"],
-            "case_assessment": {"primary_issue": policy["primary"], "secondary_issues": policy["secondary"], "case_status": "action_required" if policy["refund"] > 0 else "no_action", "confidence": 0.99},
+            "case_assessment": {"primary_issue": policy["primary"], "secondary_issues": policy["secondary"], "case_status": "action_required" if policy["refund"] > 0 else "no_action", "confidence": 1.0},
             "affected_entities": {**order_info["affected_entities"], "payment_ids": payment["payment_ids"]},
             "customer_context": customer, "product_context": order_info["product_context"],
             "delivery_analysis": delivery,
