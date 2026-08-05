@@ -1,9 +1,17 @@
 import unittest
 
-from main import PaymentAgent, PolicyAgent
+from main import OlistData, PaymentAgent, PolicyAgent
 
 
 class PolicyPipelineTests(unittest.TestCase):
+    def test_payment_rows_preserve_csv_source_order(self):
+        data = OlistData.load()
+        order_id = "23c312ca9f0242a48a95e5643bee2645"
+        self.assertEqual(
+            [row["payment_sequential"] for row in data.payments_by_order[order_id]],
+            ["2", "1"],
+        )
+
     def test_reconciled_split_payment(self):
         payment = PaymentAgent().run("o1", [{"price": "90", "freight_value": "10"}], [
             {"payment_value": "50", "payment_sequential": "1", "payment_type": "voucher"},

@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | Data/Domain agents | `main.py`: Customer, Order/Product, Payment, Delivery | Unit test fixture và output batch |
 | Policy/Verifier | `main.py`: PolicyAgent, VerifierAgent | Kiểm tra policy priority, evidence ID, array limits |
-| Coordinator online | `main.py`: `OnlineCoordinatorReviewer` | Trace ghi model Nemotron Nano 9B và review theo case |
+| Coordinator online | `main.py`: `NvidiaNimCoordinatorReviewer` | Trace ghi model Nemotron Nano 9B và review theo case |
 | Tài liệu vận hành | `architecture.md`, `metadata.json`, `trace.jsonl` | Đọc runbook, chạy batch 50 case |
 
 ## Cách triển khai
@@ -24,7 +24,7 @@ toán từ số/timestamp CSV. Policy Agent áp dụng `EC_POLICY_V2` theo thứ
 Verifier kiểm các evidence ID được dựng từ CSV, giới hạn array, confidence và null
 handling trước khi output được ghi.
 
-Coordinator gọi `nvidia/nemotron-nano-9b-v2:free` trên OpenRouter. Model được dùng để
+Coordinator gọi `nvidia/nvidia-nemotron-nano-9b-v2` trên NVIDIA NIM. Model được dùng để
 review handoff và ghi trace, không có quyền ghi đè kết quả xác định của policy engine.
 Điều này vừa có multi-agent/LLM trace vừa tránh dữ kiện hoặc số tiền bịa đặt.
 
@@ -32,17 +32,17 @@ review handoff và ghi trace, không có quyền ghi đè kết quả xác đị
 
 - Input: `input/EC_001.json` … `input/EC_050.json`, đúng schema README.
 - Output: JSON cùng tên trong `output/`, đúng schema EC_POLICY_V2.
-- Runtime config: `.env` chứa duy nhất secret `OPENROUTER_API_KEY`; model ID và 7B
-  parameter count 9B nằm trong source/`metadata.json` để chấm.
+- Runtime config: `.env` chứa secret `NVIDIA_API_KEY`; model ID và parameter
+  count 9B nằm trong source/`metadata.json` để chấm.
 - Lỗi chặn: thiếu case, order ID không tồn tại, thiếu key, model không còn miễn phí,
   hoặc output không đủ 50 file.
 
 ## Quyết định kỹ thuật
 
-Chọn NVIDIA Nemotron Nano 9B qua OpenRouter thay vì tải Ollama local. Lý do: giới hạn model được
+Chọn NVIDIA Nemotron Nano 9B qua NVIDIA NIM thay vì tải Ollama local. Lý do: giới hạn model được
 khai báo rõ dưới 10B, không mất thời gian tải model, còn số liệu nghiệp vụ vẫn được
 quyết định bằng code tái lập được. Model free thay đổi theo provider nên runner xác
-minh đúng model trước batch và không tự fallback sang model lớn hơn.
+minh theo khai báo trước batch và không tự fallback sang model lớn hơn.
 
 ## Xác minh khi có input
 
@@ -52,5 +52,4 @@ python3 main.py package
 ```
 
 Kết quả hợp lệ: 50 output JSON, 50 dòng `trace.jsonl`, `metadata.json` ghi model 9B,
-và `output.zip` chỉ chứa 50 JSON. Chưa ghi nhận “đã chạy thành công” vì input thật
-chưa được cung cấp.
+và `output.zip` chỉ chứa 50 JSON.

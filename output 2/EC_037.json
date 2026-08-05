@@ -1,9 +1,9 @@
 {
-  "case_id": "EC_016",
+  "case_id": "EC_037",
   "case_assessment": {
     "primary_issue": "late_delivery_logistics",
     "secondary_issues": [
-      "split_payment",
+      "multi_item_order",
       "repeat_customer"
     ],
     "case_status": "action_required",
@@ -11,44 +11,43 @@
   },
   "affected_entities": {
     "order_ids": [
-      "9c9353e8fd52f68f8442e580b5f2bba6"
+      "9f5bd892aa4c461b116e5c163f16b40a"
     ],
     "item_ids": [
-      "9c9353e8fd52f68f8442e580b5f2bba6:1"
+      "9f5bd892aa4c461b116e5c163f16b40a:1",
+      "9f5bd892aa4c461b116e5c163f16b40a:2"
     ],
     "seller_ids": [
-      "de23c3b98a88888289c6f5cc1209054a"
+      "8b28d096634035667e8263d57ba3368c"
     ],
     "payment_ids": [
-      "9c9353e8fd52f68f8442e580b5f2bba6:3",
-      "9c9353e8fd52f68f8442e580b5f2bba6:1",
-      "9c9353e8fd52f68f8442e580b5f2bba6:2"
+      "9f5bd892aa4c461b116e5c163f16b40a:1"
     ]
   },
   "customer_context": {
-    "customer_unique_id": "7b08fc11e1aacd85ef2845c12a9ddb81",
+    "customer_unique_id": "317f563ca3576550955f39a346b15be5",
     "related_order_ids": [
-      "4c8eac76de32572cebc64aca0f263e2a"
+      "074054ad3d2e5ee3fc6f098d06f321f9"
     ]
   },
   "product_context": {
     "product_ids": [
-      "6d1d611877ca6fe8901e27ea00df988b"
+      "da6f9d8ce4950ad572b7b4fe7d7e6c90"
     ],
     "category_names": [
-      "brinquedos"
+      "beleza_saude"
     ]
   },
   "delivery_analysis": {
-    "delivered_at": "2018-03-23 19:38:52",
-    "estimated_delivery_at": "2018-03-21 00:00:00",
-    "carrier_handoff_at": "2018-03-05 17:36:49",
-    "delivery_variance_hours": 67.65,
+    "delivered_at": "2018-03-16 10:38:40",
+    "estimated_delivery_at": "2018-03-12 00:00:00",
+    "carrier_handoff_at": "2018-02-22 20:37:22",
+    "delivery_variance_hours": 106.64,
     "seller_handoff_analysis": [
       {
-        "seller_id": "de23c3b98a88888289c6f5cc1209054a",
-        "shipping_limit_at": "2018-03-05 21:48:30",
-        "handoff_variance_hours": -4.19,
+        "seller_id": "8b28d096634035667e8263d57ba3368c",
+        "shipping_limit_at": "2018-02-26 21:15:43",
+        "handoff_variance_hours": -96.64,
         "late_handoff": false
       }
     ],
@@ -56,14 +55,13 @@
   },
   "payment_reconciliation": {
     "currency": "BRL",
-    "item_total_brl": 129.0,
-    "freight_total_brl": 18.15,
-    "expected_total_brl": 147.15,
-    "payment_total_brl": 147.15,
+    "item_total_brl": 195.8,
+    "freight_total_brl": 24.38,
+    "expected_total_brl": 220.18,
+    "payment_total_brl": 220.18,
     "difference_brl": 0.0,
     "reconciled": true,
     "payment_types": [
-      "voucher",
       "credit_card"
     ]
   },
@@ -82,21 +80,19 @@
     ]
   },
   "evidence_ids": [
-    "order:9c9353e8fd52f68f8442e580b5f2bba6",
-    "item:9c9353e8fd52f68f8442e580b5f2bba6:1",
-    "payment:9c9353e8fd52f68f8442e580b5f2bba6:3",
-    "payment:9c9353e8fd52f68f8442e580b5f2bba6:1",
-    "payment:9c9353e8fd52f68f8442e580b5f2bba6:2",
+    "order:9f5bd892aa4c461b116e5c163f16b40a",
+    "item:9f5bd892aa4c461b116e5c163f16b40a:1",
+    "item:9f5bd892aa4c461b116e5c163f16b40a:2",
+    "payment:9f5bd892aa4c461b116e5c163f16b40a:1",
     "policy:CARRIER_DELIVERED_AFTER_ESTIMATE"
   ],
   "financial_resolution": {
     "currency": "BRL",
-    "recommended_refund_brl": 18.15
+    "recommended_refund_brl": 24.38
   },
   "resolution_actions": [
     "refund_freight",
     "review_carrier_delay",
-    "verify_refund_completion",
-    "verify_payment_allocation"
+    "verify_refund_completion"
   ]
 }

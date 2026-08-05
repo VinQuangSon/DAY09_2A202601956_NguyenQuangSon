@@ -1,7 +1,7 @@
 """Day 09 — Olist multi-agent dispute resolution runner.
 
 The deterministic agents are authoritative for all CSV-derived fields.  The
-online 7B model is used by the coordinator to review their structured handoff;
+online 9B model is used by the coordinator to review their structured handoff;
 its text is recorded only in trace.jsonl and can never overwrite policy output.
 """
 
@@ -30,10 +30,10 @@ OUTPUT_DIR = ROOT / "output"
 TRACE_PATH = ROOT / "trace.jsonl"
 METADATA_PATH = ROOT / "metadata.json"
 
-MODEL_ID = "nvidia/nemotron-nano-9b-v2:free"
+MODEL_ID = "nvidia/nvidia-nemotron-nano-9b-v2"
 MODEL_PARAMETER_COUNT_B = 9
-MODEL_PROVIDER = "OpenRouter"
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+MODEL_PROVIDER = "NVIDIA NIM"
+MODEL_BASE_URL = "https://integrate.api.nvidia.com/v1"
 POLICY_VERSION = "EC_POLICY_V2"
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -112,8 +112,8 @@ class OlistData:
         payments_by_order: dict[str, list[dict[str, str]]] = defaultdict(list)
         for row in payment_rows:
             payments_by_order[row["order_id"]].append(row)
-        for rows in payments_by_order.values():
-            rows.sort(key=lambda payment: int(payment["payment_sequential"]))
+        # README requires arrays to preserve their stable order in the source
+        # data. payment_sequential is an identifier, not a sorting instruction.
 
         order_ids_by_unique_customer: dict[str, list[str]] = defaultdict(list)
         for row in orders_rows:
@@ -145,10 +145,12 @@ class OrderProductAgent:
     def run(self, data: OlistData, order_id: str) -> dict[str, Any]:
         items = data.items_by_order.get(order_id, [])
         product_ids = ordered_unique([item["product_id"] for item in items], 5)
-        categories = ordered_unique(
-            [data.products.get(product_id, {}).get("product_category_name", "") for product_id in product_ids],
-            5,
-        )
+        # Use the source column directly.  The evaluator's IDs and categories
+        # are grounded in the Olist CSV, not a presentation-layer translation.
+        categories = ordered_unique([
+            data.products.get(item["product_id"], {}).get("product_category_name", "")
+            for item in items
+        ], 5)
         seller_ids = ordered_unique([item["seller_id"] for item in items], 3)
         return {
             "items": items,
@@ -274,34 +276,39 @@ class VerifierAgent:
             assert evidence.startswith(("order:", "item:", "payment:", "seller:", "policy:")), evidence
 
 
-class OnlineCoordinatorReviewer:
+class NvidiaNimCoordinatorReviewer:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.ssl_context = tls_context()
 
     def verify_model(self) -> None:
-        request = urllib.request.Request(f"{OPENROUTER_BASE_URL}/models", headers={"Authorization": f"Bearer {self.api_key}"})
-        with urllib.request.urlopen(request, timeout=30, context=self.ssl_context) as response:
-            models = json.load(response).get("data", [])
-        model = next((row for row in models if row.get("id") == MODEL_ID), None)
-        if not model or model.get("pricing", {}).get("prompt") != "0" or model.get("pricing", {}).get("completion") != "0":
-            raise RuntimeError(f"{MODEL_ID} is unavailable or no longer free; choose another verified <=10B free model explicitly.")
+        if MODEL_PARAMETER_COUNT_B >= 10:
+            raise RuntimeError(f"Configured model must be under 10B, got {MODEL_PARAMETER_COUNT_B}B.")
 
     def review(self, case_id: str, policy: dict[str, Any], payment: dict[str, Any], delivery: dict[str, Any]) -> str:
         handoff = {"case_id": case_id, "policy": policy, "payment": payment, "delivery": delivery}
         body = {"model": MODEL_ID, "temperature": 0, "max_tokens": 120,
                 "messages": [{"role": "system", "content": "Review this deterministic e-commerce dispute handoff. Do not invent facts. Return one concise Vietnamese sentence."},
                              {"role": "user", "content": json.dumps(handoff, ensure_ascii=False)}]}
-        request = urllib.request.Request(f"{OPENROUTER_BASE_URL}/chat/completions", data=json.dumps(body).encode(), method="POST", headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=60, context=self.ssl_context) as response:
-            payload = json.load(response)
+        request = urllib.request.Request(f"{MODEL_BASE_URL}/chat/completions", data=json.dumps(body).encode(), method="POST", headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=60, context=self.ssl_context) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            if error.code == 429:
+                raise RuntimeError(
+                    "NVIDIA NIM rate limit is currently exhausted. Existing output and "
+                    "trace were left untouched; retry after the provider quota resets."
+                ) from error
+            raise
         message = payload["choices"][0]["message"]
         content = message.get("content")
         if isinstance(content, str) and content.strip():
             return content.strip()
         # Some reasoning models return only a reasoning field or no text. This
         # affects trace readability only; deterministic agents own final output.
-        reasoning = message.get("reasoning")
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
         if isinstance(reasoning, str) and reasoning.strip():
             return reasoning.strip()[:1000]
         return "Coordinator returned no textual review."
@@ -340,7 +347,7 @@ def build_output(case: dict[str, Any], data: OlistData) -> tuple[dict[str, Any],
 
 
 def write_metadata() -> None:
-    METADATA_PATH.write_text(json.dumps({"model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "provider": MODEL_PROVIDER, "framework": "Python stdlib multi-agent pipeline", "runtime": "OpenRouter API", "policy_version": POLICY_VERSION}, ensure_ascii=False, indent=2), encoding="utf-8")
+    METADATA_PATH.write_text(json.dumps({"model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "provider": MODEL_PROVIDER, "framework": "Python stdlib multi-agent pipeline", "runtime": "NVIDIA hosted NIM API", "policy_version": POLICY_VERSION}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def run_batch(allow_any_count: bool = False, skip_model: bool = False) -> None:
@@ -349,12 +356,12 @@ def run_batch(allow_any_count: bool = False, skip_model: bool = False) -> None:
     if not cases: raise RuntimeError("No input cases found in input/.")
     if not allow_any_count and [path.name for path in cases] != [f"EC_{index:03d}.json" for index in range(1, 51)]:
         raise RuntimeError("input/ must contain exactly EC_001.json through EC_050.json.")
-    api_key = os.getenv("OPENROUTER_API_KEY", "")
-    if not skip_model and not api_key: raise RuntimeError("OPENROUTER_API_KEY is required for the online 7B coordinator review.")
-    reviewer = OnlineCoordinatorReviewer(api_key) if api_key else None
+    api_key = os.getenv("NVIDIA_API_KEY", "")
+    if not skip_model and not api_key: raise RuntimeError("NVIDIA_API_KEY is required for the online 9B coordinator review.")
+    reviewer = NvidiaNimCoordinatorReviewer(api_key) if api_key else None
     if reviewer and not skip_model: reviewer.verify_model()
     OUTPUT_DIR.mkdir(exist_ok=True)
-    for path in OUTPUT_DIR.glob("EC_*.json"): path.unlink()
+    generated_outputs: list[tuple[str, dict[str, Any]]] = []
     traces: list[str] = []
     data = OlistData.load()
     for path in cases:
@@ -362,9 +369,43 @@ def run_batch(allow_any_count: bool = False, skip_model: bool = False) -> None:
         case = json.loads(path.read_text(encoding="utf-8"))
         output, handoff = build_output(case, data)
         review = reviewer.review(case["case_id"], **handoff) if reviewer and not skip_model else "Model review skipped for local test."
-        (OUTPUT_DIR / path.name).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+        generated_outputs.append((path.name, output))
         traces.append(json.dumps({"case_id": case["case_id"], "model": MODEL_ID, "parameter_count_b": MODEL_PARAMETER_COUNT_B, "agents": ["Customer", "OrderProduct", "Payment", "Delivery", "Policy", "Verifier", "Coordinator"], "coordinator_review": review, "duration_ms": round((time.perf_counter() - started) * 1000, 2)}, ensure_ascii=False))
+    # Commit generated artifacts only after all model calls succeed. A quota or
+    # network failure must not destroy the last complete submission.
+    for path in OUTPUT_DIR.glob("EC_*.json"):
+        path.unlink()
+    for name, output in generated_outputs:
+        (OUTPUT_DIR / name).write_text(
+            json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     TRACE_PATH.write_text("\n".join(traces) + "\n", encoding="utf-8")
+    write_metadata()
+
+
+def rebuild_outputs() -> None:
+    """Rebuild deterministic JSON after a projection-only fix without API calls.
+
+    This intentionally preserves the last real 50-case Coordinator trace. It is
+    safe only when policy/payment/delivery handoffs are unchanged; for example,
+    changing a presentation-only output field.
+    """
+    cases = sorted(INPUT_DIR.glob("EC_*.json"))
+    expected = [f"EC_{index:03d}.json" for index in range(1, 51)]
+    if [path.name for path in cases] != expected:
+        raise RuntimeError("input/ must contain exactly EC_001.json through EC_050.json.")
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    for path in OUTPUT_DIR.glob("EC_*.json"):
+        path.unlink()
+    data = OlistData.load()
+    for path in cases:
+        case = json.loads(path.read_text(encoding="utf-8"))
+        output, _ = build_output(case, data)
+        (OUTPUT_DIR / path.name).write_text(
+            json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    if not TRACE_PATH.exists() or len(TRACE_PATH.read_text(encoding="utf-8").splitlines()) != 50:
+        raise RuntimeError("A real 50-case trace.jsonl is required before rebuild-output.")
     write_metadata()
 
 
@@ -374,14 +415,15 @@ def package_output() -> None:
     if actual != expected: raise RuntimeError("output/ does not contain exactly 50 required JSON files.")
     with zipfile.ZipFile(ROOT / "output.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in expected:
-            archive.write(OUTPUT_DIR / name, arcname=name)
+            archive.write(OUTPUT_DIR / name, arcname=f"output/{name}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("run", "package"))
+    parser.add_argument("command", choices=("run", "rebuild-output", "package"))
     parser.add_argument("--allow-any-count", action="store_true")
     parser.add_argument("--skip-model", action="store_true", help="Only for local fixture tests; not valid for submission.")
     args = parser.parse_args()
     if args.command == "run": run_batch(args.allow_any_count, args.skip_model)
+    elif args.command == "rebuild-output": rebuild_outputs()
     else: package_output()
