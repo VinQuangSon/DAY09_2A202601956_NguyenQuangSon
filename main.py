@@ -251,7 +251,11 @@ class PolicyAgent:
         actions = [action]
         if primary == "late_delivery_seller": actions.append("review_seller_handoff")
         if primary == "late_delivery_logistics": actions.append("review_carrier_delay")
-        if refund > 0: actions.append("verify_refund_completion")
+        # The README's late-delivery example refunds freight without a
+        # completion-verification action. That action is reserved for full
+        # refunds on canceled or unavailable paid orders.
+        if primary in {"canceled_order_paid", "unavailable_order_paid"}:
+            actions.append("verify_refund_completion")
         if len(order_info["affected_entities"]["seller_ids"]) >= 2: actions.append("coordinate_multi_seller_case")
         if payment_count >= 2 and primary != "valid_split_payment": actions.append("verify_payment_allocation")
         return {

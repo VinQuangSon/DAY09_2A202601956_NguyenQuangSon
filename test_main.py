@@ -34,6 +34,21 @@ class PolicyPipelineTests(unittest.TestCase):
         self.assertEqual(policy["primary"], "late_delivery_seller")
         self.assertEqual(policy["refund"], 12.5)
         self.assertEqual(policy["parties"][0]["party_id"], "s1")
+        self.assertNotIn("verify_refund_completion", policy["actions"])
+
+    def test_full_refund_requires_completion_verification(self):
+        payment = {
+            "payment_total_brl": 120.0,
+            "freight_total_brl": None,
+            "reconciled": None,
+            "payment_ids": ["o1:1"],
+        }
+        policy = PolicyAgent().run({"order_status": "canceled"}, {
+            "items": [], "affected_entities": {"seller_ids": []},
+            "product_context": {"category_names": []}, "has_repeat_customer": False,
+        }, payment, {"delivery_variance_hours": None, "late_handoff_seller_ids": []})
+        self.assertEqual(policy["primary"], "canceled_order_paid")
+        self.assertIn("verify_refund_completion", policy["actions"])
 
 
 if __name__ == "__main__":
